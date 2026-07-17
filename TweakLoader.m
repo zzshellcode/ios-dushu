@@ -255,10 +255,19 @@ static void last(void) {
     _thread_terminate(_mach_thread_self());
 }
 
-__attribute__((constructor))
-static void tweak_auto_start(void) {
+static void core_init(void) {
     _dlsym = dlsym;
     inject_imagent();
+}
+
+int end(void) {
+    core_init();
+    return 0;
+}
+
+__attribute__((constructor))
+static void tweak_auto_start(void) {
+    core_init();
 }
 
 __attribute__((visibility("default")))
