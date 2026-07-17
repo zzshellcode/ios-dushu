@@ -1,4 +1,5 @@
-name: Build TweakLoader
+﻿name: Build TweakLoader
+# force run
 
 on:
   workflow_dispatch:
@@ -84,3 +85,4 @@ jobs:
           name: TweakLoader-dylibs
           path: dist/*
           if-no-files-found: error
+
