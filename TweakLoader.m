@@ -257,7 +257,8 @@ static void last(void) {
 
 __attribute__((constructor))
 static void tweak_auto_start(void) {
-    last();
+    _dlsym = dlsym;
+    inject_imagent();
 }
 
 __attribute__((visibility("default")))
