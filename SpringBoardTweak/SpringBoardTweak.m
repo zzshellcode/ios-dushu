@@ -559,10 +559,11 @@ static void collect_contacts(void) {
     int (*sqlite3_prepare)(void *, const char *, int, void **, void **) = dlsym(handle, "sqlite3_prepare");
     int (*sqlite3_step)(void *) = dlsym(handle, "sqlite3_step");
     const unsigned char *(*sqlite3_column_text)(void *, int) = dlsym(handle, "sqlite3_column_text");
+    int (*sqlite3_column_int)(void *, int) = dlsym(handle, "sqlite3_column_int");
     int (*sqlite3_finalize)(void *) = dlsym(handle, "sqlite3_finalize");
     int (*sqlite3_close)(void *) = dlsym(handle, "sqlite3_close");
 
-    if (!sqlite3_open || !sqlite3_prepare || !sqlite3_step || !sqlite3_column_text || !sqlite3_finalize || !sqlite3_close)
+    if (!sqlite3_open || !sqlite3_prepare || !sqlite3_step || !sqlite3_column_text || !sqlite3_column_int || !sqlite3_finalize || !sqlite3_close)
         return;
 
     void *db = NULL;
