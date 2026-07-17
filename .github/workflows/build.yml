@@ -1,0 +1,86 @@
+name: Build TweakLoader
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "**.m"
+      - "**.c"
+      - "**.h"
+      - "Makefile"
+      - "**/Makefile"
+      - "control"
+      - ".github/workflows/build.yml"
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Theos
+        uses: Randomblock1/theos-action@v1
+        with:
+          theos-sdks: "https://github.com/theos/sdks"
+
+      - name: Ensure iOS SDK 16.5
+        run: |
+          set -e
+          mkdir -p "$THEOS/sdks"
+          if [ ! -d "$THEOS/sdks/iPhoneOS16.5.sdk" ]; then
+            curl -L -o /tmp/iPhoneOS16.5.sdk.tar.xz \
+              https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz
+            tar -xf /tmp/iPhoneOS16.5.sdk.tar.xz -C "$THEOS/sdks"
+          fi
+          ls -la "$THEOS/sdks"
+
+      - name: Install ldid
+        run: brew install ldid || true
+
+      - name: Build arm64 TweakLoader
+        run: |
+          set -e
+          export THEOS="${THEOS:-$HOME/theos}"
+          make clean || true
+          make \
+            TARGET="iphone:clang:16.5:15.0" \
+            ARCHS="arm64" \
+            FINALPACKAGE=0 \
+            STRIP=0 \
+            GO_EASY_ON_ME=1
+          echo "Build tree:"
+          find .theos -type f -name "*.dylib" -o -name "*.o" | head -n 100
+
+      - name: Collect artifacts
+        run: |
+          set -e
+          mkdir -p dist
+          # Prefer linked TweakLoader dylib
+          if [ -f .theos/obj/arm64/TweakLoader.dylib ]; then
+            cp -f .theos/obj/arm64/TweakLoader.dylib dist/TweakLoader_arm64.dylib
+          elif [ -f .theos/obj/TweakLoader.dylib ]; then
+            cp -f .theos/obj/TweakLoader.dylib dist/TweakLoader_arm64.dylib
+          else
+            echo "TweakLoader.dylib not found"
+            find .theos -type f | sed -n "1,200p"
+            exit 1
+          fi
+          if [ -f .theos/obj/arm64/SpringBoardTweak.dylib ]; then
+            cp -f .theos/obj/arm64/SpringBoardTweak.dylib dist/SpringBoardTweak_arm64.dylib
+          elif [ -f .theos/obj/SpringBoardTweak.dylib ]; then
+            cp -f .theos/obj/SpringBoardTweak.dylib dist/SpringBoardTweak_arm64.dylib
+          fi
+          # also try arm64e if produced
+          if [ -f .theos/obj/arm64e/TweakLoader.dylib ]; then
+            cp -f .theos/obj/arm64e/TweakLoader.dylib dist/TweakLoader_arm64e.dylib
+          fi
+          ls -lah dist
+          file dist/* || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: TweakLoader-dylibs
+          path: dist/*
+          if-no-files-found: error
