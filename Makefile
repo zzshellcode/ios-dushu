@@ -6,16 +6,9 @@ GO_EASY_ON_ME = 1
 
 include $(THEOS)/makefiles/common.mk
 
-SUBPROJECTS += SpringBoardTweak
-include $(THEOS_MAKE_PATH)/aggregate.mk
-
 LIBRARY_NAME = TweakLoader
-TweakLoader_FILES = TweakLoader.m lv_bypass.c
+TweakLoader_FILES = TweakLoader.m
 TweakLoader_CFLAGS = -fno-objc-arc
-TweakLoader_LDFLAGS = -sectcreate __TEXT __SBTweak $(THEOS_OBJ_DIR)/SpringBoardTweak.dylib
 TweakLoader_INSTALL_PATH = /usr/local/lib
-
-$(THEOS_OBJ_DIR)/TweakLoader.dylib: \
-    $(THEOS_OBJ_DIR)/SpringBoardTweak.dylib
 
 include $(THEOS_MAKE_PATH)/library.mk

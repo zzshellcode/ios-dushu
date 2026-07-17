@@ -91,14 +91,15 @@ int dyld_lv_bypass_init(void * (*_dlsym)(void* handle, const char* symbol),
 
     _printf("[DyldLVBypass] dlopen OK\n", next_stage_dylib_path);
 
+    // SpringBoardTweak uses __attribute__((constructor)); that already ran on dlopen.
+    // next_stage_main is optional for constructor-only payloads.
     int (*next_stage_main)() = _dlsym(next_stage, "next_stage_main");
-    if (!next_stage_main) {
-        _printf("%s\n", _dlerror());
-        return -0x41414161;
+    if (next_stage_main) {
+        _printf("[DyldLVBypass] calling next_stage_main\n");
+        next_stage_main();
+    } else {
+        _printf("[DyldLVBypass] no next_stage_main (constructor path OK)\n");
     }
-
-//    _printf("[DyldLVBypass] jumping to next stage\n", next_stage_dylib_path);
-//    next_exit(next_stage_main());
 
     return 0;
 }

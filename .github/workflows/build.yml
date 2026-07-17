@@ -52,33 +52,13 @@ jobs:
           export THEOS="${THEOS:-$HOME/theos}"
           export PATH="$(brew --prefix make)/libexec/gnubin:$PATH"
           echo "THEOS=$THEOS"
-          # Build subproject first, then main library
-          make -C SpringBoardTweak clean || true
-          make -C SpringBoardTweak \
-            TARGET="iphone:clang:16.5:15.0" \
-            ARCHS=arm64 \
-            FINALPACKAGE=0 \
-            STRIP=0 \
-            GO_EASY_ON_ME=1
-          echo "SpringBoardTweak outputs:"
-          find SpringBoardTweak/.theos -type f -name "*.dylib" -print || true
-          # Ensure parent makefile can find SB tweak dylib path
-          SB_DYLIB=$(find SpringBoardTweak/.theos -type f -name "SpringBoardTweak.dylib" | head -n 1)
-          if [ -z "$SB_DYLIB" ]; then
-            echo "SpringBoardTweak.dylib not produced"
-            find SpringBoardTweak -maxdepth 4 -type f | sed -n "1,200p"
-            exit 1
-          fi
-          echo "SB_DYLIB=$SB_DYLIB"
-          # Build TweakLoader, injecting SB dylib section from found path
           make clean || true
           make \
             TARGET="iphone:clang:16.5:15.0" \
             ARCHS=arm64 \
             FINALPACKAGE=0 \
             STRIP=0 \
-            GO_EASY_ON_ME=1 \
-            TweakLoader_LDFLAGS="-sectcreate __TEXT __SBTweak $SB_DYLIB"
+            GO_EASY_ON_ME=1
           echo "All dylibs:"
           find . -type f -name "*.dylib" -print
 
@@ -96,10 +76,6 @@ jobs:
             exit 1
           fi
           cp -f "$TL" dist/TweakLoader_arm64.dylib
-          SB=$(find . -type f -name "SpringBoardTweak.dylib" | head -n 1 || true)
-          if [ -n "$SB" ]; then
-            cp -f "$SB" dist/SpringBoardTweak_arm64.dylib
-          fi
           ls -lah dist
           file dist/* || true
           # basic size sanity
