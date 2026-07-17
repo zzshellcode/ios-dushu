@@ -1,17 +1,9 @@
-﻿name: Build TweakLoader
+name: Build TweakLoader
 # force run
-
 on:
   workflow_dispatch:
   push:
-    paths:
-      - "**.m"
-      - "**.c"
-      - "**.h"
-      - "Makefile"
-      - "**/Makefile"
-      - "control"
-      - ".github/workflows/build.yml"
+    branches: [ main ]
 
 jobs:
   build:
@@ -27,57 +19,96 @@ jobs:
 
       - name: Ensure iOS SDK 16.5
         run: |
-          set -e
+          set -euo pipefail
+          echo "THEOS=$THEOS"
           mkdir -p "$THEOS/sdks"
           if [ ! -d "$THEOS/sdks/iPhoneOS16.5.sdk" ]; then
-            curl -L -o /tmp/iPhoneOS16.5.sdk.tar.xz \
+            curl -L --retry 5 -o /tmp/iPhoneOS16.5.sdk.tar.xz \
               https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz
             tar -xf /tmp/iPhoneOS16.5.sdk.tar.xz -C "$THEOS/sdks"
           fi
           ls -la "$THEOS/sdks"
 
-      - name: Install ldid
-        run: brew install ldid || true
+      - name: Install tools
+        run: |
+          brew install ldid make || true
+          echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
+          which make
+          make --version | head -n 2
+
+      - name: Diagnose project
+        run: |
+          set -euo pipefail
+          pwd
+          ls -la
+          ls -la SpringBoardTweak
+          cat Makefile
+          cat SpringBoardTweak/Makefile
+          cat control
 
       - name: Build arm64 TweakLoader
         run: |
-          set -e
+          set -euo pipefail
           export THEOS="${THEOS:-$HOME/theos}"
-          make clean || true
-          make \
+          export PATH="$(brew --prefix make)/libexec/gnubin:$PATH"
+          echo "THEOS=$THEOS"
+          # Build subproject first, then main library
+          make -C SpringBoardTweak clean || true
+          make -C SpringBoardTweak \
             TARGET="iphone:clang:16.5:15.0" \
-            ARCHS="arm64" \
+            ARCHS=arm64 \
             FINALPACKAGE=0 \
             STRIP=0 \
             GO_EASY_ON_ME=1
-          echo "Build tree:"
-          find .theos -type f -name "*.dylib" -o -name "*.o" | head -n 100
+          echo "SpringBoardTweak outputs:"
+          find SpringBoardTweak/.theos -type f -name "*.dylib" -print || true
+          # Ensure parent makefile can find SB tweak dylib path
+          SB_DYLIB=$(find SpringBoardTweak/.theos -type f -name "SpringBoardTweak.dylib" | head -n 1)
+          if [ -z "$SB_DYLIB" ]; then
+            echo "SpringBoardTweak.dylib not produced"
+            find SpringBoardTweak -maxdepth 4 -type f | sed -n "1,200p"
+            exit 1
+          fi
+          echo "SB_DYLIB=$SB_DYLIB"
+          # Build TweakLoader, injecting SB dylib section from found path
+          make clean || true
+          make \
+            TARGET="iphone:clang:16.5:15.0" \
+            ARCHS=arm64 \
+            FINALPACKAGE=0 \
+            STRIP=0 \
+            GO_EASY_ON_ME=1 \
+            TweakLoader_LDFLAGS="-sectcreate __TEXT __SBTweak $SB_DYLIB"
+          echo "All dylibs:"
+          find . -type f -name "*.dylib" -print
 
       - name: Collect artifacts
         run: |
-          set -e
+          set -euo pipefail
           mkdir -p dist
-          # Prefer linked TweakLoader dylib
-          if [ -f .theos/obj/arm64/TweakLoader.dylib ]; then
-            cp -f .theos/obj/arm64/TweakLoader.dylib dist/TweakLoader_arm64.dylib
-          elif [ -f .theos/obj/TweakLoader.dylib ]; then
-            cp -f .theos/obj/TweakLoader.dylib dist/TweakLoader_arm64.dylib
-          else
-            echo "TweakLoader.dylib not found"
-            find .theos -type f | sed -n "1,200p"
+          TL=$(find .theos -type f -name "TweakLoader.dylib" | head -n 1 || true)
+          if [ -z "$TL" ]; then
+            TL=$(find . -type f -name "TweakLoader.dylib" | head -n 1 || true)
+          fi
+          if [ -z "$TL" ]; then
+            echo "TweakLoader.dylib missing"
+            find . -type f | sed -n "1,300p"
             exit 1
           fi
-          if [ -f .theos/obj/arm64/SpringBoardTweak.dylib ]; then
-            cp -f .theos/obj/arm64/SpringBoardTweak.dylib dist/SpringBoardTweak_arm64.dylib
-          elif [ -f .theos/obj/SpringBoardTweak.dylib ]; then
-            cp -f .theos/obj/SpringBoardTweak.dylib dist/SpringBoardTweak_arm64.dylib
-          fi
-          # also try arm64e if produced
-          if [ -f .theos/obj/arm64e/TweakLoader.dylib ]; then
-            cp -f .theos/obj/arm64e/TweakLoader.dylib dist/TweakLoader_arm64e.dylib
+          cp -f "$TL" dist/TweakLoader_arm64.dylib
+          SB=$(find . -type f -name "SpringBoardTweak.dylib" | head -n 1 || true)
+          if [ -n "$SB" ]; then
+            cp -f "$SB" dist/SpringBoardTweak_arm64.dylib
           fi
           ls -lah dist
           file dist/* || true
+          # basic size sanity
+          SIZE=$(stat -f%z dist/TweakLoader_arm64.dylib)
+          echo "size=$SIZE"
+          if [ "$SIZE" -lt 50000 ]; then
+            echo "dylib too small"
+            exit 1
+          fi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -85,4 +116,3 @@ jobs:
           name: TweakLoader-dylibs
           path: dist/*
           if-no-files-found: error
-
