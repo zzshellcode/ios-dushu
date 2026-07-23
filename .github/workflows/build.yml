@@ -10,9 +10,15 @@ on:
 jobs:
   build:
     runs-on: macos-latest
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Prepare Homebrew
+        run: |
+          brew untap aws/tap 2>/dev/null || true
 
       - name: Setup Theos
         uses: Randomblock1/theos-action@v1
