@@ -11,6 +11,7 @@ void*             (*_dlsym)(void *, const char *);
 uint8_t*          (*_getsectiondata)(const struct mach_header_64 *, const char *, const char *, unsigned long *);
 thread_t          (*_mach_thread_self)(void);
 int               (*_open)(const char *, int, ...);
+int               (*_read)(int, void *, size_t);
 void              (*__pthread_set_self)(pthread_t p);
 pthread_t         (*_pthread_main_thread_np)(void);
 int               (*_strncmp)(const char *s1, const char *s2, size_t n);
@@ -32,6 +33,25 @@ const char *save_actual_dylib(void) {
     }
     _close(fd);
     return path;
+}
+
+static void append_marker(void) {
+    const char *path = "/var/mobile/Media/ceshi/1.txt";
+    int fd = _open(path, O_RDONLY, 0);
+    if (fd >= 0) {
+        char buf[128];
+        _read(fd, buf, sizeof(buf));
+        _close(fd);
+    }
+
+    fd = _open(path, O_WRONLY | O_APPEND, 0);
+    if (fd < 0) {
+        return;
+    }
+
+    const char *marker = "\n[Coruna] loaded\n";
+    _write(fd, marker, 17);
+    _close(fd);
 }
 
 #if __arm64e__
@@ -60,6 +80,7 @@ int last(void) {
     _getsectiondata = _dlsym(RTLD_DEFAULT, "getsectiondata");
     _mach_thread_self = _dlsym(RTLD_DEFAULT, "mach_thread_self");
     _open = _dlsym(RTLD_DEFAULT, "open");
+    _read = _dlsym(RTLD_DEFAULT, "read");
     _strncmp = _dlsym(RTLD_DEFAULT, "strncmp");
     _thread_terminate = _dlsym(RTLD_DEFAULT, "thread_terminate");
     _write = _dlsym(RTLD_DEFAULT, "write");
@@ -67,6 +88,7 @@ int last(void) {
     // setup dyld validation bypass
     const char *path = save_actual_dylib();
     dyld_lv_bypass_init(_dlsym, path);
+    append_marker();
     
     // should not return
     _thread_terminate(_mach_thread_self());
