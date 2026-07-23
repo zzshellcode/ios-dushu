@@ -52,7 +52,6 @@ jobs:
           export THEOS="${THEOS:-$HOME/theos}"
           export PATH="$(brew --prefix make)/libexec/gnubin:$PATH"
           echo "THEOS=$THEOS"
-          make -C SpringBoardTweak clean || true
           make -C SpringBoardTweak \
             TARGET="iphone:clang:16.5:15.0" \
             ARCHS=arm64 \

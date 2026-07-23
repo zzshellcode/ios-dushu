@@ -1,5 +1,6 @@
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <stdbool.h>
 #include <sys/mman.h>
 #include <mach-o/loader.h>
 #include <mach-o/nlist.h>
