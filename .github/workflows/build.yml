@@ -1,0 +1,31 @@
+name: Build TweakLoader
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Theos
+        uses: Randomblock1/theos-action@v1
+        with:
+          theos-dir: ${{ github.workspace }}/theos
+
+      - name: Build package
+        working-directory: TweakLoader
+        run: make package FINALPACKAGE=1
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: TweakLoader-deb
+          path: TweakLoader/packages/*.deb
+          if-no-files-found: error

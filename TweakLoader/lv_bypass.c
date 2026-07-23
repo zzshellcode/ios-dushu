@@ -68,11 +68,11 @@ int dyld_lv_bypass_init(void * (*_dlsym)(void* handle, const char* symbol),
         return -0x41414147;
 
     _munmap = _dlsym(RTLD_DEFAULT, "munmap");
-    if (!_dlerror)
+    if (!_munmap)
         return -0x41414148;
 
     _mprotect = _dlsym(RTLD_DEFAULT, "mprotect");
-    if (!_dlerror)
+    if (!_mprotect)
         return -0x41414149;
 
     next_exit = _dlsym(RTLD_DEFAULT, "exit");
@@ -91,14 +91,8 @@ int dyld_lv_bypass_init(void * (*_dlsym)(void* handle, const char* symbol),
 
     _printf("[DyldLVBypass] dlopen OK\n", next_stage_dylib_path);
 
-    int (*next_stage_main)() = _dlsym(next_stage, "next_stage_main");
-    if (!next_stage_main) {
-        _printf("%s\n", _dlerror());
-        return -0x41414161;
-    }
-
-//    _printf("[DyldLVBypass] jumping to next stage\n", next_stage_dylib_path);
-//    next_exit(next_stage_main());
+    // The embedded dylib uses its constructor as its entry point and does
+    // not need to export a next_stage_main symbol.
 
     return 0;
 }
@@ -203,7 +197,16 @@ static void* hooked_mmap(void *addr, size_t len, int prot, int flags, int fd, of
     void *map = __mmap(addr, len, prot, flags, fd, offset);
     if (map == MAP_FAILED && fd && (prot & PROT_EXEC)) {
         map = __mmap(addr, len, PROT_READ | PROT_WRITE, flags | MAP_PRIVATE | MAP_ANON, 0, 0);
+        if (map == MAP_FAILED) {
+            return MAP_FAILED;
+        }
+
         void *memoryLoadedFile = __mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, offset);
+        if (memoryLoadedFile == MAP_FAILED) {
+            _munmap(map, len);
+            return MAP_FAILED;
+        }
+
         builtin_memcpy(map, memoryLoadedFile, len);
         _munmap(memoryLoadedFile, len);
         _mprotect(map, len, prot);
@@ -212,6 +215,10 @@ static void* hooked_mmap(void *addr, size_t len, int prot, int flags, int fd, of
 }
 
 static int hooked___fcntl(int fildes, int cmd, void *param) {
+    if (!orig_fcntl) {
+        return -1;
+    }
+
     if (cmd == F_ADDFILESIGS_RETURN) {
 #if !(TARGET_OS_MACCATALYST || TARGET_OS_SIMULATOR)
         // attempt to attach code signature on iOS only as the binaries may have been signed
@@ -243,7 +250,13 @@ static void init_bypassDyldLibValidation(void) {
     //signal(SIGBUS, SIG_IGN);
     
     orig_fcntl = __fcntl;
-    char *dyldBase = (char *)_alt_dyld_get_all_image_infos()->dyldImageLoadAddress;
+    struct dyld_all_image_infos *imageInfos = _alt_dyld_get_all_image_infos();
+    if (!imageInfos || !imageInfos->dyldImageLoadAddress) {
+        _printf("[DyldLVBypass] dyld image info unavailable\n");
+        return;
+    }
+
+    char *dyldBase = (char *)imageInfos->dyldImageLoadAddress;
     //redirectFunction("mmap", mmap, hooked_mmap);
     //redirectFunction("fcntl", fcntl, hooked_fcntl);
     searchAndPatch("dyld_mmap", dyldBase, mmapSig, sizeof(mmapSig), hooked_mmap);

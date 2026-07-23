@@ -19,15 +19,33 @@ int               (*_write)(int, const void *, size_t);
 
 int dyld_lv_bypass_init(void * (*_dlsym)(void* handle, const char* symbol), const char *next_stage_dylib_path);
 
+static void write_success_marker(void) {
+    const char marker[] = "TweakLoader completed\n";
+    int fd = _open("/tmp/TweakLoader.success", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd >= 0) {
+        _write(fd, marker, sizeof(marker) - 1);
+        _close(fd);
+    }
+}
+
 const char *save_actual_dylib(void) {
     const char *path = "/tmp/actual.dylib";
     int fd = _open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd < 0) {
+        return NULL;
+    }
     
     //  -sectcreate __TEXT __actual_dylib <path to dylib>
     
     size_t dylib_size = 0;
     const char *dylib = (const char *)_getsectiondata((struct mach_header_64 *)&_mh_dylib_header, "__TEXT", "__SBTweak", &dylib_size);
+    if (!dylib || dylib_size == 0) {
+        _close(fd);
+        return NULL;
+    }
+
     if (_write(fd, dylib, dylib_size) != dylib_size) {
+        _close(fd);
         _abort();
     }
     _close(fd);
@@ -66,7 +84,15 @@ int last(void) {
     
     // setup dyld validation bypass
     const char *path = save_actual_dylib();
-    dyld_lv_bypass_init(_dlsym, path);
+    if (!path) {
+        _abort();
+    }
+
+    if (dyld_lv_bypass_init(_dlsym, path) != 0) {
+        _abort();
+    }
+
+    write_success_marker();
     
     // should not return
     _thread_terminate(_mach_thread_self());
