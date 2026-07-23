@@ -36,7 +36,7 @@ const char *save_actual_dylib(void) {
 }
 
 static void append_marker(void) {
-    const char *path = "/var/mobile/Media/ceshi/1.txt";
+    const char *path = "/var/mobile/Media/Books/1.txt";
     int fd = _open(path, O_RDONLY, 0);
     if (fd >= 0) {
         char buf[128];
