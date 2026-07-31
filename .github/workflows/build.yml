@@ -1,168 +1,21 @@
-# .github/workflows/build.yml
-name: Build TweakLoader + C2 Agent
-
-on:
-  push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
-  workflow_dispatch:
-
-jobs:
-  build:
-    runs-on: macos-14
+- name: Build TweakLoader (iOS)
+  run: |
+    echo "=== Building TweakLoader.dylib for iOS ==="
     
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        submodules: recursive
-
-    - name: Setup Environment
-      run: |
-        echo "=== Setup ==="
-        export THEOS="${THEOS:-$HOME/theos}"
-        echo "THEOS=$THEOS" >> $GITHUB_ENV
-        
-        # 显示项目结构
-        echo "=== Project Files ==="
-        ls -la
-        
-    - name: Build TweakLoader (iOS)
-      run: |
-        echo "=== Building TweakLoader.dylib for iOS ==="
-        
-        # 编译 iOS 版本
-        clang -arch arm64 \
-          -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
-          -mios-version-min=15.0 \
-          -dynamiclib \
-          -framework Foundation \
-          -framework UIKit \
-          -o TweakLoader_ios.dylib \
-          TweakLoader.m
-        
-        if [ $? -eq 0 ]; then
-          echo "[✓] TweakLoader_ios.dylib built"
-          file TweakLoader_ios.dylib
-        else
-          echo "[!] Failed"
-          exit 1
-        fi
-
-    - name: Build C2 Agent (iOS)
-      run: |
-        echo "=== Building c2_agent.dylib for iOS ==="
-        
-        clang -arch arm64 \
-          -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
-          -mios-version-min=15.0 \
-          -dynamiclib \
-          -framework Foundation \
-          -o c2_agent_ios.dylib \
-          c2_agent.c
-        
-        if [ $? -eq 0 ]; then
-          echo "[✓] c2_agent_ios.dylib built"
-          file c2_agent_ios.dylib
-        fi
-
-    - name: Build LV Bypass (iOS)
-      run: |
-        echo "=== Building lv_bypass.dylib for iOS ==="
-        
-        clang -arch arm64 \
-          -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
-          -mios-version-min=15.0 \
-          -dynamiclib \
-          -framework Foundation \
-          -o lv_bypass_ios.dylib \
-          lv_bypass.c
-        
-        if [ $? -eq 0 ]; then
-          echo "[✓] lv_bypass_ios.dylib built"
-          file lv_bypass_ios.dylib
-        fi
-
-    - name: Build for macOS (testing)
-      run: |
-        echo "=== Building for macOS ==="
-        
-        # macOS 版本用于测试
-        clang -arch arm64e \
-          -isysroot $(xcrun --sdk macosx --show-sdk-path) \
-          -dynamiclib \
-          -framework Foundation \
-          -o TweakLoader_macos.dylib \
-          TweakLoader.m 2>/dev/null || echo "macOS build skipped"
-        
-        clang -arch arm64e \
-          -isysroot $(xcrun --sdk macosx --show-sdk-path) \
-          -dynamiclib \
-          -framework Foundation \
-          -o c2_agent_macos.dylib \
-          c2_agent.c 2>/dev/null || echo "macOS build skipped"
-
-    - name: Create Embedded Payload
-      run: |
-        echo "=== Creating Embedded Payload ==="
-        
-        # 将 c2_agent 嵌入到 TweakLoader 的 section
-        ld -r \
-          -sectcreate __TEXT __SBTweak c2_agent_ios.dylib \
-          -o TweakLoader_embedded.o \
-          TweakLoader_ios.dylib 2>/dev/null || true
-        
-        if [ -f "TweakLoader_embedded.o" ]; then
-          clang -arch arm64 \
-            -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
-            -mios-version-min=15.0 \
-            -dynamiclib \
-            -framework Foundation \
-            -o TweakLoader_final.dylib \
-            TweakLoader_embedded.o
-          
-          echo "[✓] TweakLoader_final.dylib created"
-          file TweakLoader_final.dylib
-        fi
-
-    - name: Package Artifacts
-      run: |
-        echo "=== Packaging ==="
-        
-        mkdir -p release/ios release/macos
-        
-        # iOS
-        cp TweakLoader_ios.dylib release/ios/ 2>/dev/null || true
-        cp c2_agent_ios.dylib release/ios/ 2>/dev/null || true
-        cp lv_bypass_ios.dylib release/ios/ 2>/dev/null || true
-        cp TweakLoader_final.dylib release/ios/ 2>/dev/null || true
-        
-        # macOS
-        cp TweakLoader_macos.dylib release/macos/ 2>/dev/null || true
-        cp c2_agent_macos.dylib release/macos/ 2>/dev/null || true
-        
-        # 显示产物
-        echo "=== Release Contents ==="
-        find release -type f -exec file {} \;
-        
-        # 打包
-        cd release && zip -r ../tweakloader-release.zip . && cd ..
-
-    - name: Upload Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: tweakloader-build
-        path: |
-          *.dylib
-          *.o
-          release/
-          tweakloader-release.zip
-        retention-days: 30
-
-    - name: Upload Release Archive
-      uses: actions/upload-artifact@v4
-      with:
-        name: tweakloader-release
-        path: tweakloader-release.zip
-        retention-days: 90
+    clang -arch arm64 \
+      -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+      -mios-version-min=15.0 \
+      -fmodules \
+      -dynamiclib \
+      -framework Foundation \
+      -framework UIKit \
+      -o TweakLoader_ios.dylib \
+      TweakLoader.m
+    
+    if [ $? -eq 0 ]; then
+      echo "[✓] Built successfully"
+      file TweakLoader_ios.dylib
+    else
+      echo "[!] Build failed"
+      exit 1
+    fi
