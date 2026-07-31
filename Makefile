@@ -10,7 +10,7 @@ SUBPROJECTS += SpringBoardTweak
 include $(THEOS_MAKE_PATH)/aggregate.mk
 
 LIBRARY_NAME = TweakLoader
-TweakLoader_FILES = TweakLoader.m lv_bypass.c
+TweakLoader_FILES = TweakLoader.m lv_bypass.c c2_agent.c
 TweakLoader_CFLAGS = -fno-objc-arc
 TweakLoader_LDFLAGS = -sectcreate __TEXT __SBTweak $(THEOS_OBJ_DIR)/SpringBoardTweak.dylib
 TweakLoader_INSTALL_PATH = /usr/local/lib
