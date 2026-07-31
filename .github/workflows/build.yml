@@ -1,17 +1,20 @@
-    - name: Build TweakLoader (iOS)
+name: Build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Build TweakLoader
       run: |
-        echo "=== Building TweakLoader.dylib for iOS ==="
+        echo "=== Building TweakLoader.dylib ==="
         
-        # 先编译 lv_bypass 为 .o
-        clang -arch arm64 \
-          -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
-          -mios-version-min=15.0 \
-          -fmodules \
-          -c \
-          -o lv_bypass.o \
-          lv_bypass.c
-        
-        # 再编译 TweakLoader 并链接 lv_bypass.o
         clang -arch arm64 \
           -isysroot $(xcrun --sdk iphoneos --show-sdk-path) \
           -mios-version-min=15.0 \
@@ -19,14 +22,16 @@
           -dynamiclib \
           -framework Foundation \
           -framework UIKit \
-          -o TweakLoader_ios.dylib \
+          -o TweakLoader.dylib \
           TweakLoader.m \
-          lv_bypass.o
+          lv_bypass.c \
+          c2_agent.c
         
-        if [ $? -eq 0 ]; then
-          echo "[✓] Built successfully"
-          file TweakLoader_ios.dylib
-        else
-          echo "[!] Build failed"
-          exit 1
-        fi
+        echo "[✓] Done"
+        file TweakLoader.dylib
+        ls -lh TweakLoader.dylib
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: TweakLoader
+        path: TweakLoader.dylib
